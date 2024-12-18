@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,13 +35,29 @@ import (
 var migrationsFS embed.FS
 
 func NewInMemoryBackend(opts ...option) *sqliteBackend {
-	b := newSqliteBackend("file::memory:?mode=memory&cache=shared", opts...)
+	options := &options{
+		Options:            backend.ApplyOptions(),
+		ApplyMigrations:    true,
+		MaxOpenConnections: 2,
+		SQLiteOptions: []sqliteOption{
+			{key: "mode", value: "memory"},
+			{key: "cache", value: "shared"},
+		},
+	}
+
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	vals := url.Values{}
+	for _, kv := range options.SQLiteOptions {
+		vals.Add(kv.key, kv.value)
+	}
+
+	b := newSqliteBackend("file::memory?"+vals.Encode(), options) //opts...)
 
 	b.db.SetConnMaxIdleTime(0)
 	b.db.SetMaxIdleConns(1)
-
-	// WORKAROUND: Keep a connection open at all times to prevent hte in-memory db from being dropped
-	b.db.SetMaxOpenConns(2)
 
 	var err error
 	b.memConn, err = b.db.Conn(context.Background())
@@ -51,19 +69,36 @@ func NewInMemoryBackend(opts ...option) *sqliteBackend {
 }
 
 func NewSqliteBackend(path string, opts ...option) *sqliteBackend {
-	return newSqliteBackend(fmt.Sprintf("file:%v?_mutex=no&_journal=wal", path), opts...)
-}
-
-func newSqliteBackend(dsn string, opts ...option) *sqliteBackend {
 	options := &options{
-		Options:         backend.ApplyOptions(),
-		ApplyMigrations: true,
+		Options:            backend.ApplyOptions(),
+		ApplyMigrations:    true,
+		MaxOpenConnections: 1,
+		SQLiteOptions: []sqliteOption{
+			{key: "_mutex", value: "no"},
+			{key: "_journal", value: "wal"},
+		},
 	}
 
 	for _, opt := range opts {
 		opt(options)
 	}
 
+	vals := url.Values{}
+	for _, kv := range options.SQLiteOptions {
+		vals.Add(kv.key, kv.value)
+	}
+
+	filepath, _ := filepath.Abs(path)
+	url := url.URL{
+		Scheme:   "file",
+		Path:     filepath,
+		RawQuery: vals.Encode(),
+	}
+
+	return newSqliteBackend(url.String(), options)
+}
+
+func newSqliteBackend(dsn string, opts *options) *sqliteBackend {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		panic(err)
@@ -72,16 +107,16 @@ func newSqliteBackend(dsn string, opts ...option) *sqliteBackend {
 	// SQLite does not support multiple writers on the database, see https://www.sqlite.org/faq.html#q5
 	// A frequently used workaround is to have a single connection, effectively acting as a mutex
 	// See https://github.com/mattn/go-sqlite3/issues/274 for more context
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(opts.MaxOpenConnections)
 
 	b := &sqliteBackend{
 		db:         db,
 		workerName: fmt.Sprintf("worker-%v", uuid.NewString()),
-		options:    options,
+		options:    opts,
 	}
 
 	// Apply migrations
-	if options.ApplyMigrations {
+	if opts.ApplyMigrations {
 		if err := b.Migrate(); err != nil {
 			panic(err)
 		}

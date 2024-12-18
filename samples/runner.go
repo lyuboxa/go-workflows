@@ -25,7 +25,15 @@ func GetBackend(name string, opt ...backend.BackendOption) backend.Backend {
 		return sqlite.NewInMemoryBackend(sqlite.WithBackendOptions(opt...))
 
 	case "sqlite":
-		return sqlite.NewSqliteBackend(name+".sqlite", sqlite.WithBackendOptions(opt...))
+		return sqlite.NewSqliteBackend(
+			name+".sqlite",
+			sqlite.WithBackendOptions(opt...),
+			sqlite.WithMaxOpenConnections(10),
+			sqlite.WithSQLiteOption("_pragma", "busy_timeout(10000)"),
+			sqlite.WithSQLiteOption("_pragma", "journal_mode(WAL)"),
+			sqlite.WithSQLiteOption("_txlock", "immediate"),
+			sqlite.WithSQLiteOption("_pragma", "synchronous(NORMAL)"),
+		)
 
 	case "mysql":
 		{
